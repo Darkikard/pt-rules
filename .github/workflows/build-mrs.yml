@@ -1,0 +1,162 @@
+name: Build PT Rules
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 */3 *'  # 每3天自动更新
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch & Parse PT Sites
+        run: |
+          # 下载 pre-dessert-sites
+          curl -sL "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip
+          unzip -q sites.zip -d sites
+
+          python3 << 'PYEOF'
+          import os, json
+          from urllib.parse import urlparse
+
+          SITES_DIR = "sites/pre-dessert-sites-main/site_config/sites"
+          COMMONS_DIR = "sites/pre-dessert-sites-main/site_config/commons"
+
+          # 排除的非PT域名
+          EXCLUDE = {"t.me", "bilibili.download"}
+
+          site_domains = set()
+          tracker_keywords = set()
+
+          # 遍历所有站点 JSON
+          for fname in sorted(os.listdir(SITES_DIR)):
+              if not fname.endswith(".json"):
+                  continue
+              try:
+                  with open(os.path.join(SITES_DIR, fname)) as f:
+                      data = json.load(f)
+              except:
+                  continue
+
+              urls = []
+              if data.get("domain"):
+                  urls.append(data["domain"])
+              urls.extend(data.get("additional_domain", []))
+              if data.get("api"):
+                  urls.append(data["api"])
+
+              for url in urls:
+                  if not url:
+                      continue
+                  parsed = urlparse(url if "://" in url else "https://" + url)
+                  host = parsed.hostname
+                  if not host or host in EXCLUDE:
+                      continue
+
+                  parts = host.split(".")
+                  # www.xxx.com → xxx.com
+                  if parts[0] == "www" and len(parts) >= 3:
+                      root = ".".join(parts[1:])
+                      site_domains.add(root)
+                  else:
+                      site_domains.add(host)
+
+                  # 生成 tracker 子域名
+                  if parts[0] != "www" and len(parts) >= 2:
+                      suffix = ".".join(parts[-2:])
+                      tracker_keywords.add(f"tracker.{suffix}")
+
+          # 排序
+          site_domains = sorted(site_domains)
+          tracker_keywords = sorted(tracker_keywords)
+          tracker_set = set(tracker_keywords)
+
+          print(f"Sites: {len(site_domains)}, Trackers: {len(tracker_keywords)}")
+
+          # 写 pt-direct.txt
+          with open("pt-direct.txt", "w") as f:
+              for d in site_domains:
+                  f.write(f"+.{d}\n")
+
+          # 写 pt-tracker-direct.txt
+          with open("pt-tracker-direct.txt", "w") as f:
+              for d in tracker_keywords:
+                  f.write(f"+.{d}\n")
+              f.write("tracker\n")  # DOMAIN-KEYWORD 兜底
+
+          # 写 pt-tracker-fakeip.txt
+          with open("pt-tracker-fakeip.txt", "w") as f:
+              for d in tracker_keywords:
+                  f.write(f"+.{d}\n")
+
+          PYEOF
+
+      - name: Check changes
+        id: diff
+        run: |
+          git diff --quiet pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Generate MRS
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          # 下载 mihomo 生成 MRS
+          curl -sL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz" | gunzip > mihomo
+          chmod +x mihomo
+
+          python3 -m http.server 18080 &
+          HTTP_PID=$!
+          sleep 2
+
+          cat > /tmp/convert.yaml << 'EOF2'
+          mode: rule
+          log-level: silent
+          external-controller: 127.0.0.1:19090
+          proxies:
+            - {name: DUMMY, type: direct}
+          rule-providers:
+            pt-direct:
+              type: http
+              url: "http://127.0.0.1:18080/pt-direct.txt"
+              path: ./gen-rules/pt-direct.txt
+              format: text
+              behavior: domain
+              interval: 86400
+            pt-tracker:
+              type: http
+              url: "http://127.0.0.1:18080/pt-tracker-direct.txt"
+              path: ./gen-rules/pt-tracker.txt
+              format: text
+              behavior: domain
+              interval: 86400
+            pt-fakeip:
+              type: http
+              url: "http://127.0.0.1:18080/pt-tracker-fakeip.txt"
+              path: ./gen-rules/pt-fakeip.txt
+              format: text
+              behavior: domain
+              interval: 8640
+          rules:
+            - MATCH,DUMMY
+          EOF2
+
+          ./mihomo -d . -f /tmp/convert.yaml &
+          sleep 8
+          kill $(pgrep mihomo) 2>/dev/null || true
+          kill $HTTP_PID 2>/dev/null || true
+
+          cp gen-rules/*.mrs ./ 2>/dev/null || true
+          ls -la *.mrs 2>/dev/null || echo "MRS generation skipped"
+
+      - name: Commit & Push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt *.mrs
+          git commit -m "auto: update PT rules $(date +%Y-%m-%d)"
+          git push
