@@ -99,7 +99,9 @@ jobs:
       - name: Check changes
         id: diff
         run: |
-          git diff --quiet pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+          # 先暂存生成的文件，再对比是否有变化
+          git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt
+          git diff --cached --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
 
       - name: Generate MRS
         if: steps.diff.outputs.changed == 'true'
