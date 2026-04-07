@@ -9,44 +9,44 @@ on:
         default: 'false'
         type: boolean
   schedule:
-    - cron: '0 0 */3 * *'  # 每3天UTC时间0点执行
+    - cron: '0 0 */3 * *'  # 每3天自动更新
 
 permissions:
   contents: write
 
+# 新增：强制使用 Node.js 24 解决弃用警告
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # 整体超时保护
+    timeout-minutes: 15  # 新增：整体超时保护，避免卡死
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Dependencies
+      # 新增：显式安装依赖（解决 unzip/python3 缺失风险）
+      - name: Install Basic Dependencies
         run: |
-          # 确保基础工具齐全
-          sudo apt update && sudo apt install -y python3 unzip curl jq coreutils
-          # 创建必要目录
-          mkdir -p gen-rules
+          sudo apt update && sudo apt install -y python3 unzip curl coreutils
 
       - name: Cache mihomo
         id: cache-mihomo
         uses: actions/cache@v4
         with:
           path: ./mihomo
-          key: mihomo-$(date +%Y%m)  # 按月缓存，避免版本过旧
-          restore-keys: |
-            mihomo-
+          key: mihomo-v1.19.1
 
       - name: Fetch & Parse PT Sites
-        id: parse-sites
         run: |
-          # 增强下载容错：重试+超时
+          # 优化：下载重试+超时，避免网络波动失败
           curl -sL --retry 3 --connect-timeout 10 "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip || {
-            echo "Failed to download sites zip"
+            echo "Download sites zip failed"
             exit 1
           }
+          # 优化：检查解压是否成功
           unzip -q sites.zip -d sites || {
-            echo "Failed to unzip sites zip"
+            echo "Unzip sites zip failed"
             exit 1
           }
 
@@ -57,164 +57,145 @@ jobs:
           SITES_DIR = "sites/pre-dessert-sites-main/site_config/sites"
           COMMONS_DIR = "sites/pre-dessert-sites-main/site_config/commons"
 
-          # 扩展排除列表，减少无效域名
+          # 扩展排除列表，过滤无效域名
           EXCLUDE = {"t.me", "bilibili.download", "localhost", "127.0.0.1", "::1"}
 
           site_domains = set()
           tracker_suffixes = set()
 
-          # 检查目录是否存在
+          # 优化：检查目录是否存在
           if not os.path.exists(SITES_DIR):
               print(f"Error: {SITES_DIR} not found", file=sys.stderr)
               sys.exit(1)
 
           # 遍历所有站点 JSON
-          file_count = 0
           for fname in sorted(os.listdir(SITES_DIR)):
               if not fname.endswith(".json"):
                   continue
-              file_count += 1
-              fpath = os.path.join(SITES_DIR, fname)
               try:
-                  with open(fpath, encoding='utf-8') as f:
+                  # 优化：指定 UTF-8 编码，避免解析乱码
+                  with open(os.path.join(SITES_DIR, fname), encoding='utf-8') as f:
                       data = json.load(f)
-              except json.JSONDecodeError:
-                  print(f"Warning: Invalid JSON in {fname}, skip", file=sys.stderr)
-                  continue
               except Exception as e:
-                  print(f"Warning: Error reading {fname}: {e}, skip", file=sys.stderr)
+                  print(f"Warning: skip {fname} - {e}", file=sys.stderr)
                   continue
 
               urls = []
-              # 兼容不同字段名（增强容错）
-              domain_field = data.get("domain") or data.get("hostname")
-              if domain_field:
-                  urls.append(domain_field)
+              if data.get("domain"):
+                  urls.append(data["domain"])
               urls.extend(data.get("additional_domain", []))
-              urls.extend(data.get("alternate_domain", []))
               if data.get("api"):
                   urls.append(data["api"])
 
               for url in urls:
-                  if not isinstance(url, str) or not url.strip():
+                  if not url:
                       continue
-                  url = url.strip()
-                  # 补全协议头
-                  parsed = urlparse(url if "://" in url else f"https://{url}")
+                  parsed = urlparse(url if "://" in url else "https://" + url)
                   host = parsed.hostname
                   if not host or host in EXCLUDE or host.replace('.','').isdigit():
                       continue
 
                   parts = host.split(".")
-                  # 优化域名简化逻辑（避免多级www）
-                  while parts[0] == "www" and len(parts) >= 3:
-                      parts = parts[1:]
-                  root_host = ".".join(parts)
-                  site_domains.add(root_host)
+                  # www.xxx.com → xxx.com
+                  if parts[0] == "www" and len(parts) >= 3:
+                      root = ".".join(parts[1:])
+                      site_domains.add(root)
+                  else:
+                      site_domains.add(host)
 
-                  # 收集Tracker后缀（仅保留有效后缀）
-                  if len(parts) >= 2 and not root_host.endswith((".local", ".lan")):
-                      tracker_suffixes.add(root_host)
+                  # 收集 TLD+1 后缀，避免重复生成 tracker
+                  if len(parts) >= 2:
+                      tracker_suffixes.add(".".join(parts[-2:]))
 
-          # 去重并排序
-          site_domains = sorted(list(site_domains))
-          tracker_suffixes = sorted(list(tracker_suffixes))
-          tracker_keywords = sorted([f"tracker.{s}" for s in tracker_suffixes])
+          # 优化：验证解析结果，避免空文件
+          if len(site_domains) == 0:
+              print("Error: No valid PT domains found", file=sys.stderr)
+              sys.exit(1)
 
-          print(f"Processed {file_count} files, got {len(site_domains)} site domains, {len(tracker_suffixes)} tracker suffixes")
+          # 生成 tracker 域名
+          tracker_keywords = sorted(f"tracker.{s}" for s in tracker_suffixes)
+          site_domains = sorted(site_domains)
 
-          # 写入文件（确保目录存在）
-          def write_file(path, lines):
-              with open(path, "w", encoding='utf-8') as f:
-                  f.writelines(lines)
+          print(f"Sites: {len(site_domains)}, Tracker suffixes: {len(tracker_suffixes)}")
 
-          # 生成pt-direct.txt
-          write_file("pt-direct.txt", [f"+.{d}\n" for d in site_domains])
-          # 生成pt-tracker-direct.txt（增加更多兜底规则）
-          tracker_lines = [f"+.{d}\n" for d in tracker_keywords] + ["tracker\n", "*.tracker\n"]
-          write_file("pt-tracker-direct.txt", tracker_lines)
-          # 生成pt-tracker-fakeip.txt
-          write_file("pt-tracker-fakeip.txt", [f"+.{d}\n" for d in tracker_keywords])
+          # 写 pt-direct.txt
+          with open("pt-direct.txt", "w", encoding='utf-8') as f:
+              for d in site_domains:
+                  f.write(f"+.{d}\n")
 
-          # 输出统计信息（用于后续判断）
-          echo "site_count={len(site_domains)}" >> $GITHUB_OUTPUT
-          echo "tracker_count={len(tracker_keywords)}" >> $GITHUB_OUTPUT
+          # 写 pt-tracker-direct.txt
+          with open("pt-tracker-direct.txt", "w", encoding='utf-8') as f:
+              for d in tracker_keywords:
+                  f.write(f"+.{d}\n")
+              f.write("tracker\n")  # DOMAIN-KEYWORD 兜底
+
+          # 写 pt-tracker-fakeip.txt
+          with open("pt-tracker-fakeip.txt", "w", encoding='utf-8') as f:
+              for d in tracker_keywords:
+                  f.write(f"+.{d}\n")
           PYEOF
 
       - name: Check changes
         id: diff
         run: |
           git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt
-          # 双重检查：文件变更 + 有效数据量
           if [[ "${{ inputs.force_build }}" == "true" ]]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           else
-            # 检查是否有文件变更，且解析到的域名数量>0
-            if git diff --cached --quiet || [[ ${{ steps.parse-sites.outputs.site_count }} -eq 0 ]]; then
+            # 优化：双重检查（diff + 文件非空）
+            if git diff --cached --quiet; then
               echo "changed=false" >> $GITHUB_OUTPUT
             else
-              echo "changed=true" >> $GITHUB_OUTPUT
+              [[ -s pt-direct.txt ]] && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
             fi
           fi
 
-      - name: Download mihomo (fallback to latest)
+      - name: Download mihomo
         if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit != 'true'
         run: |
-          # 优先下载指定版本，失败则用最新通用版本
+          # 优化：多源下载 + 可执行性验证，避免单源失效
           MI_HOMO_URLS=(
             "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz"
             "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64.gz"
           )
           for url in "${MI_HOMO_URLS[@]}"; do
-            echo "Trying to download mihomo from: $url"
             if curl -sL --retry 3 --connect-timeout 10 "$url" | gunzip > mihomo; then
               chmod +x mihomo
-              # 验证可执行性
-              if ./mihomo -v >/dev/null 2>&1; then
-                echo "Successfully downloaded mihomo"
-                exit 0
-              fi
+              # 验证二进制文件是否可用
+              ./mihomo -v >/dev/null 2>&1 && exit 0
             fi
-            echo "Failed to download from $url"
           done
-          echo "All mihomo download attempts failed"
+          echo "Mihomo download failed (all sources)"
           exit 1
 
-      - name: Generate MRS (Enhanced)
+      - name: Generate MRS
         if: steps.diff.outputs.changed == 'true'
-        id: generate-mrs
         run: |
-          # 验证mihomo可执行
-          if ! ./mihomo -v >/dev/null 2>&1; then
-            echo "mihomo is not executable"
-            exit 1
-          fi
+          chmod +x mihomo
 
-          # 随机端口避免冲突
+          # 优化：随机端口，避免端口占用冲突
           HTTP_PORT=$((18080 + RANDOM % 100))
           API_PORT=$((19090 + RANDOM % 100))
-          echo "Using HTTP port: $HTTP_PORT, API port: $API_PORT"
 
-          # 启动HTTP服务（绑定临时目录）
-          python3 -m http.server $HTTP_PORT --bind 127.0.0.1 --directory . &
+          # 启动 HTTP 服务
+          python3 -m http.server $HTTP_PORT --bind 127.0.0.1 &
           HTTP_PID=$!
-          sleep 3  # 延长启动等待时间
+          sleep 3  # 延长等待，确保服务启动
 
-          # 验证HTTP服务可用
-          if ! curl -s "http://127.0.0.1:$HTTP_PORT/pt-direct.txt" >/dev/null 2>&1; then
+          # 验证 HTTP 服务是否可用
+          curl -s "http://127.0.0.1:$HTTP_PORT/pt-direct.txt" >/dev/null 2>&1 || {
             echo "HTTP server failed to start"
             kill $HTTP_PID 2>/dev/null || true
             exit 1
-          fi
+          }
 
-          # 生成convert.yaml（使用随机端口）
+          # 生成配置文件（替换固定端口为随机端口）
           cat > /tmp/convert.yaml << EOF2
           mode: rule
-          log-level: error
+          log-level: error  # 优化：输出错误日志，便于调试
           external-controller: 127.0.0.1:$API_PORT
           proxies:
-            - name: DUMMY
-              type: direct
+            - {name: DUMMY, type: direct}
           rule-providers:
             pt-direct:
               type: http
@@ -241,83 +222,69 @@ jobs:
             - MATCH,DUMMY
           EOF2
 
-          # 启动mihomo（后台运行）
+          # 启动 mihomo 生成 MRS
           ./mihomo -d . -f /tmp/convert.yaml > mihomo.log 2>&1 &
           MI_HOMO_PID=$!
-          sleep 2
 
-          # 等待MRS生成（延长超时到60秒，分步检查）
+          # 优化：更可靠的等待逻辑（最多 60 秒）
           MAX_WAIT=60
           WAIT_COUNT=0
           while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
-            if ls gen-rules/*.mrs 2>/dev/null | grep -q .; then
-              echo "MRS files generated successfully"
+            if ls gen-rules/*.mrs 2>/dev/null; then
               break
             fi
             WAIT_COUNT=$((WAIT_COUNT + 1))
             sleep 1
           done
 
-          # 强制终止进程（避免僵尸进程）
-          kill $MI_HOMO_PID 2>/dev/null || true
-          kill $HTTP_PID 2>/dev/null || true
-
-          # 检查MRS文件是否生成
-          if ! ls gen-rules/*.mrs 2>/dev/null | grep -q .; then
-            echo "MRS generation timeout or failed"
+          # 检查是否生成成功
+          if ! ls gen-rules/*.mrs 2>/dev/null; then
+            echo "MRS generation timeout/failed, logs:"
             cat mihomo.log  # 输出日志便于调试
+            kill $MI_HOMO_PID 2>/dev/null || true
+            kill $HTTP_PID 2>/dev/null || true
             exit 1
           fi
 
-          # 复制MRS文件并验证
-          cp gen-rules/*.mrs ./ || true
-          if ls *.mrs 2>/dev/null; then
-            echo "mrs_generated=true" >> $GITHUB_OUTPUT
-            ls -la *.mrs
-          else
-            echo "mrs_generated=false" >> $GITHUB_OUTPUT
-          fi
+          # 清理进程（精准杀死，避免误杀）
+          kill $MI_HOMO_PID 2>/dev/null || true
+          kill $HTTP_PID 2>/dev/null || true
 
-      - name: Commit & Push (Safe Mode)
+          # 复制 MRS 文件
+          cp gen-rules/*.mrs ./ 2>/dev/null || true
+          ls -la *.mrs 2>/dev/null || echo "No MRS files generated"
+
+      - name: Commit & Push
         if: steps.diff.outputs.changed == 'true'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 拉取最新代码避免冲突
+          # 优化：拉取最新代码，避免推送冲突
           git pull --rebase origin main || git pull --rebase origin master
 
-          # 添加文件（仅添加存在的文件）
+          # 优化：仅添加存在的文件，避免空文件提交
           git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt 2>/dev/null
-          if [[ ${{ steps.generate-mrs.outputs.mrs_generated }} == "true" ]]; then
-            git add *.mrs 2>/dev/null
-          fi
+          ls *.mrs 2>/dev/null && git add *.mrs 2>/dev/null
 
-          # 检查是否有提交内容
+          # 优化：检查是否有内容需要提交
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
 
-          # 提交并推送（重试机制）
+          # 优化：推送重试，避免网络波动失败
           for i in {1..3}; do
-            if git commit -m "auto: update PT rules $(date +%Y-%m-%d_%H:%M:%S) [site:${{ steps.parse-sites.outputs.site_count }}]"; then
-              if git push; then
-                echo "Push successful"
-                exit 0
-              fi
-            fi
-            echo "Attempt $i failed, retrying..."
+            git commit -m "auto: update PT rules $(date +%Y-%m-%d_%H:%M:%S)" && git push && exit 0
             sleep 2
           done
-
           echo "Push failed after 3 attempts"
           exit 1
 
+      # 新增：强制清理进程，避免资源泄漏
       - name: Cleanup
         if: always()
         run: |
-          # 清理进程和临时文件
           kill $(pgrep -f "python3 -m http.server") 2>/dev/null || true
           kill $(pgrep -f "./mihomo") 2>/dev/null || true
-          rm -rf sites sites.zip /tmp/convert.yaml mihomo.log gen-rules/*
+          rm -rf sites sites.zip /tmp/convert.yaml mihomo.log
