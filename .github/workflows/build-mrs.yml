@@ -14,22 +14,11 @@ on:
 permissions:
   contents: write
 
-# 修复：强制使用 Node.js 24 解决弃用警告
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 新增：整体超时保护，避免卡死
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      # 修复：显式安装依赖，避免 unzip/python3 缺失
-      - name: Install Basic Dependencies
-        run: |
-          sudo apt update && sudo apt install -y python3 unzip curl coreutils
 
       - name: Cache mihomo
         id: cache-mihomo
@@ -40,45 +29,32 @@ jobs:
 
       - name: Fetch & Parse PT Sites
         run: |
-          # 修复：下载重试+超时，避免网络波动失败
-          curl -sL --retry 3 --connect-timeout 10 "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip || {
-            echo "Error: Download sites zip failed"
-            exit 1
-          }
-          # 修复：检查解压是否成功
-          unzip -q sites.zip -d sites || {
-            echo "Error: Unzip sites zip failed"
-            exit 1
-          }
+          # 下载 pre-dessert-sites
+          curl -sL "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip
+          unzip -q sites.zip -d sites
 
           python3 << 'PYEOF'
-          import os, json, sys
+          import os, json
           from urllib.parse import urlparse
 
           SITES_DIR = "sites/pre-dessert-sites-main/site_config/sites"
           COMMONS_DIR = "sites/pre-dessert-sites-main/site_config/commons"
 
-          # 扩展排除列表，过滤无效域名
-          EXCLUDE = {"t.me", "bilibili.download", "localhost", "127.0.0.1", "::1"}
+          # 排除的非PT域名
+          EXCLUDE = {"t.me", "bilibili.download"}
 
           site_domains = set()
           tracker_suffixes = set()
-
-          # 修复：检查目录是否存在
-          if not os.path.exists(SITES_DIR):
-              print(f"Error: {SITES_DIR} not found", file=sys.stderr)
-              sys.exit(1)
 
           # 遍历所有站点 JSON
           for fname in sorted(os.listdir(SITES_DIR)):
               if not fname.endswith(".json"):
                   continue
               try:
-                  # 修复：指定 UTF-8 编码，避免解析乱码
-                  with open(os.path.join(SITES_DIR, fname), encoding='utf-8') as f:
+                  with open(os.path.join(SITES_DIR, fname)) as f:
                       data = json.load(f)
               except Exception as e:
-                  print(f"Warning: skip {fname} - {e}", file=sys.stderr)
+                  print(f"Error parsing {fname}: {e}")
                   continue
 
               urls = []
@@ -93,7 +69,7 @@ jobs:
                       continue
                   parsed = urlparse(url if "://" in url else "https://" + url)
                   host = parsed.hostname
-                  if not host or host in EXCLUDE or host.replace('.','').isdigit():
+                  if not host or host in EXCLUDE:
                       continue
 
                   parts = host.split(".")
@@ -108,11 +84,6 @@ jobs:
                   if len(parts) >= 2:
                       tracker_suffixes.add(".".join(parts[-2:]))
 
-          # 修复：验证解析结果，避免空文件
-          if len(site_domains) == 0:
-              print("Error: No valid PT domains found", file=sys.stderr)
-              sys.exit(1)
-
           # 生成 tracker 域名
           tracker_keywords = sorted(f"tracker.{s}" for s in tracker_suffixes)
           site_domains = sorted(site_domains)
@@ -120,20 +91,21 @@ jobs:
           print(f"Sites: {len(site_domains)}, Tracker suffixes: {len(tracker_suffixes)}")
 
           # 写 pt-direct.txt
-          with open("pt-direct.txt", "w", encoding='utf-8') as f:
+          with open("pt-direct.txt", "w") as f:
               for d in site_domains:
                   f.write(f"+.{d}\n")
 
           # 写 pt-tracker-direct.txt
-          with open("pt-tracker-direct.txt", "w", encoding='utf-8') as f:
+          with open("pt-tracker-direct.txt", "w") as f:
               for d in tracker_keywords:
                   f.write(f"+.{d}\n")
               f.write("tracker\n")  # DOMAIN-KEYWORD 兜底
 
           # 写 pt-tracker-fakeip.txt
-          with open("pt-tracker-fakeip.txt", "w", encoding='utf-8') as f:
+          with open("pt-tracker-fakeip.txt", "w") as f:
               for d in tracker_keywords:
                   f.write(f"+.{d}\n")
+
           PYEOF
 
       - name: Check changes
@@ -143,78 +115,69 @@ jobs:
           if [[ "${{ inputs.force_build }}" == "true" ]]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           else
-            # 修复：双重检查（diff + 文件非空）
-            if git diff --cached --quiet; then
-              echo "changed=false" >> $GITHUB_OUTPUT
-            else
-              [[ -s pt-direct.txt ]] && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
-            fi
+            git diff --cached --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Download mihomo
+        id: download_mihomo
         if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit != 'true'
+        continue-on-error: true  # 下载失败不终止流程
         run: |
-          # 修复：多源下载 + 可执行性验证，避免单源失效
-          MI_HOMO_URLS=(
-            "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz"
-            "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64.gz"
-          )
-          for url in "${MI_HOMO_URLS[@]}"; do
-            if curl -sL --retry 3 --connect-timeout 10 "$url" | gunzip > mihomo; then
-              chmod +x mihomo
-              # 验证二进制文件是否可用
-              ./mihomo -v >/dev/null 2>&1 && exit 0
-            fi
-          done
-          echo "Error: Mihomo download failed (all sources)"
-          exit 1
+          # 检测下载是否成功
+          if ! curl -sL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz" | gunzip > mihomo; then
+            echo "mihomo_download_success=false" >> $GITHUB_OUTPUT
+            echo "::error::mihomo 内核下载失败"
+            exit 1
+          fi
+          chmod +x mihomo
+          echo "mihomo_download_success=true" >> $GITHUB_OUTPUT
+
+      - name: Mark mihomo cache success
+        id: cache_success
+        if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit == 'true'
+        run: |
+          echo "mihomo_download_success=true" >> $GITHUB_OUTPUT
+
+      - name: Notify mihomo download failure
+        if: steps.download_mihomo.outputs.mihomo_download_success == 'false'
+        run: |
+          echo "::warning::mihomo 内核下载失败，将跳过 MRS 生成步骤"
 
       - name: Generate MRS
-        if: steps.diff.outputs.changed == 'true'
+        if: |
+          steps.diff.outputs.changed == 'true' && 
+          (steps.download_mihomo.outputs.mihomo_download_success == 'true' || steps.cache_success.outputs.mihomo_download_success == 'true')
         run: |
           chmod +x mihomo
 
-          # 修复：随机端口，避免端口占用冲突
-          HTTP_PORT=$((18080 + RANDOM % 100))
-          API_PORT=$((19090 + RANDOM % 100))
-
-          # 启动 HTTP 服务
-          python3 -m http.server $HTTP_PORT --bind 127.0.0.1 &
+          python3 -m http.server 18080 --bind 127.0.0.1 &
           HTTP_PID=$!
-          sleep 3  # 延长等待，确保服务启动
+          sleep 2
 
-          # 修复：验证 HTTP 服务是否可用
-          curl -s "http://127.0.0.1:$HTTP_PORT/pt-direct.txt" >/dev/null 2>&1 || {
-            echo "Error: HTTP server failed to start"
-            kill $HTTP_PID 2>/dev/null || true
-            exit 1
-          }
-
-          # 生成配置文件（替换固定端口为随机端口）
-          cat > /tmp/convert.yaml << EOF2
+          cat > /tmp/convert.yaml << 'EOF2'
           mode: rule
-          log-level: error  # 修复：输出错误日志，便于调试
-          external-controller: 127.0.0.1:$API_PORT
+          log-level: silent
+          external-controller: 127.0.0.1:19090
           proxies:
             - {name: DUMMY, type: direct}
           rule-providers:
             pt-direct:
               type: http
-              url: "http://127.0.0.1:$HTTP_PORT/pt-direct.txt"
+              url: "http://127.0.0.1:18080/pt-direct.txt"
               path: ./gen-rules/pt-direct.txt
               format: text
               behavior: domain
               interval: 86400
             pt-tracker:
               type: http
-              url: "http://127.0.0.1:$HTTP_PORT/pt-tracker-direct.txt"
+              url: "http://127.0.0.1:18080/pt-tracker-direct.txt"
               path: ./gen-rules/pt-tracker.txt
               format: text
               behavior: domain
               interval: 86400
             pt-fakeip:
               type: http
-              url: "http://127.0.0.1:$HTTP_PORT/pt-tracker-fakeip.txt"
+              url: "http://127.0.0.1:18080/pt-tracker-fakeip.txt"
               path: ./gen-rules/pt-fakeip.txt
               format: text
               behavior: domain
@@ -223,69 +186,29 @@ jobs:
             - MATCH,DUMMY
           EOF2
 
-          # 启动 mihomo 生成 MRS
-          ./mihomo -d . -f /tmp/convert.yaml > mihomo.log 2>&1 &
-          MI_HOMO_PID=$!
+          ./mihomo -d . -f /tmp/convert.yaml &
 
-          # 修复：更可靠的等待逻辑（最多 60 秒）
-          MAX_WAIT=60
-          WAIT_COUNT=0
-          while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
-            if ls gen-rules/*.mrs 2>/dev/null; then
-              break
-            fi
-            WAIT_COUNT=$((WAIT_COUNT + 1))
-            sleep 1
-          done
-
-          # 检查是否生成成功
-          if ! ls gen-rules/*.mrs 2>/dev/null; then
-            echo "Error: MRS generation timeout/failed, logs:"
-            cat mihomo.log  # 输出日志便于调试
-            kill $MI_HOMO_PID 2>/dev/null || true
+          # 等待 MRS 文件生成，最多 30 秒
+          timeout 30 bash -c 'until ls gen-rules/*.mrs 2>/dev/null; do sleep 1; done' || {
+            echo "MRS generation timeout"
+            kill $(pgrep mihomo) 2>/dev/null || true
             kill $HTTP_PID 2>/dev/null || true
             exit 1
-          fi
+          }
 
-          # 清理进程（精准杀死，避免误杀）
-          kill $MI_HOMO_PID 2>/dev/null || true
+          kill $(pgrep mihomo) 2>/dev/null || true
           kill $HTTP_PID 2>/dev/null || true
 
-          # 复制 MRS 文件
           cp gen-rules/*.mrs ./ 2>/dev/null || true
-          ls -la *.mrs 2>/dev/null || echo "Warning: No MRS files generated"
+          ls -la *.mrs 2>/dev/null || echo "MRS generation skipped"
 
       - name: Commit & Push
         if: steps.diff.outputs.changed == 'true'
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 修复：拉取最新代码，避免推送冲突
-          git pull --rebase origin main || git pull --rebase origin master
-
-          # 修复：仅添加存在的文件，避免空文件提交
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          # 仅添加存在的文件，避免 MRS 未生成时报错
           git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt 2>/dev/null
           ls *.mrs 2>/dev/null && git add *.mrs 2>/dev/null
-
-          # 修复：检查是否有内容需要提交
-          if git diff --cached --quiet; then
-            echo "Info: No changes to commit"
-            exit 0
-          fi
-
-          # 修复：推送重试，避免网络波动失败
-          for i in {1..3}; do
-            git commit -m "auto: update PT rules $(date +%Y-%m-%d_%H:%M:%S)" && git push && exit 0
-            sleep 2
-          done
-          echo "Error: Push failed after 3 attempts"
-          exit 1
-
-      # 新增：强制清理进程，避免资源泄漏
-      - name: Cleanup
-        if: always()
-        run: |
-          kill $(pgrep -f "python3 -m http.server") 2>/dev/null || true
-          kill $(pgrep -f "./mihomo") 2>/dev/null || true
-          rm -rf sites sites.zip /tmp/convert.yaml mihomo.log
+          git commit -m "auto: update PT rules $(date +%Y-%m-%d)"
+          git push
