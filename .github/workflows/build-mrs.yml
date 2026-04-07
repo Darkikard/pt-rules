@@ -3,7 +3,7 @@ name: Build PT Rules
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 */3 *'  # 每3天自动更新
+    - cron: '0 0 */3 * *'  # 每3天自动更新
 
 permissions:
   contents: write
@@ -139,7 +139,7 @@ jobs:
               path: ./gen-rules/pt-fakeip.txt
               format: text
               behavior: domain
-              interval: 8640
+              interval: 86400
           rules:
             - MATCH,DUMMY
           EOF2
