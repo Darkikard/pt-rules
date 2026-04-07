@@ -2,6 +2,12 @@ name: Build PT Rules
 
 on:
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force rebuild (skip diff check)'
+        required: false
+        default: 'false'
+        type: boolean
   schedule:
     - cron: '0 0 */3 * *'  # 每3天自动更新
 
@@ -13,6 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache mihomo
+        id: cache-mihomo
+        uses: actions/cache@v4
+        with:
+          path: ./mihomo
+          key: mihomo-v1.19.1
 
       - name: Fetch & Parse PT Sites
         run: |
@@ -31,7 +44,7 @@ jobs:
           EXCLUDE = {"t.me", "bilibili.download"}
 
           site_domains = set()
-          tracker_keywords = set()
+          tracker_suffixes = set()
 
           # 遍历所有站点 JSON
           for fname in sorted(os.listdir(SITES_DIR)):
@@ -40,7 +53,8 @@ jobs:
               try:
                   with open(os.path.join(SITES_DIR, fname)) as f:
                       data = json.load(f)
-              except:
+              except Exception as e:
+                  print(f"Error parsing {fname}: {e}")
                   continue
 
               urls = []
@@ -66,17 +80,15 @@ jobs:
                   else:
                       site_domains.add(host)
 
-                  # 生成 tracker 子域名
-                  if parts[0] != "www" and len(parts) >= 2:
-                      suffix = ".".join(parts[-2:])
-                      tracker_keywords.add(f"tracker.{suffix}")
+                  # 收集 TLD+1 后缀，避免重复生成 tracker
+                  if len(parts) >= 2:
+                      tracker_suffixes.add(".".join(parts[-2:]))
 
-          # 排序
+          # 生成 tracker 域名
+          tracker_keywords = sorted(f"tracker.{s}" for s in tracker_suffixes)
           site_domains = sorted(site_domains)
-          tracker_keywords = sorted(tracker_keywords)
-          tracker_set = set(tracker_keywords)
 
-          print(f"Sites: {len(site_domains)}, Trackers: {len(tracker_keywords)}")
+          print(f"Sites: {len(site_domains)}, Tracker suffixes: {len(tracker_suffixes)}")
 
           # 写 pt-direct.txt
           with open("pt-direct.txt", "w") as f:
@@ -99,18 +111,25 @@ jobs:
       - name: Check changes
         id: diff
         run: |
-          # 先暂存生成的文件，再对比是否有变化
           git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt
-          git diff --cached --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+          if [[ "${{ inputs.force_build }}" == "true" ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            git diff --cached --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download mihomo
+        if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit != 'true'
+        run: |
+          curl -sL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz" | gunzip > mihomo
+          chmod +x mihomo
 
       - name: Generate MRS
         if: steps.diff.outputs.changed == 'true'
         run: |
-          # 下载 mihomo 生成 MRS
-          curl -sL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz" | gunzip > mihomo
           chmod +x mihomo
 
-          python3 -m http.server 18080 &
+          python3 -m http.server 18080 --bind 127.0.0.1 &
           HTTP_PID=$!
           sleep 2
 
@@ -147,7 +166,15 @@ jobs:
           EOF2
 
           ./mihomo -d . -f /tmp/convert.yaml &
-          sleep 8
+
+          # 等待 MRS 文件生成，最多 30 秒
+          timeout 30 bash -c 'until ls gen-rules/*.mrs 2>/dev/null; do sleep 1; done' || {
+            echo "MRS generation timeout"
+            kill $(pgrep mihomo) 2>/dev/null || true
+            kill $HTTP_PID 2>/dev/null || true
+            exit 1
+          }
+
           kill $(pgrep mihomo) 2>/dev/null || true
           kill $HTTP_PID 2>/dev/null || true
 
