@@ -14,18 +14,19 @@ on:
 permissions:
   contents: write
 
-# 新增：强制使用 Node.js 24 解决弃用警告
+# 修复：强制使用 Node.js 24 解决弃用警告
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # 新增：整体超时保护，避免卡死
+    # 新增：整体超时保护，避免卡死
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      # 新增：显式安装依赖（解决 unzip/python3 缺失风险）
+      # 修复：显式安装依赖，避免 unzip/python3 缺失
       - name: Install Basic Dependencies
         run: |
           sudo apt update && sudo apt install -y python3 unzip curl coreutils
@@ -39,14 +40,14 @@ jobs:
 
       - name: Fetch & Parse PT Sites
         run: |
-          # 优化：下载重试+超时，避免网络波动失败
+          # 修复：下载重试+超时，避免网络波动失败
           curl -sL --retry 3 --connect-timeout 10 "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip || {
-            echo "Download sites zip failed"
+            echo "Error: Download sites zip failed"
             exit 1
           }
-          # 优化：检查解压是否成功
+          # 修复：检查解压是否成功
           unzip -q sites.zip -d sites || {
-            echo "Unzip sites zip failed"
+            echo "Error: Unzip sites zip failed"
             exit 1
           }
 
@@ -63,7 +64,7 @@ jobs:
           site_domains = set()
           tracker_suffixes = set()
 
-          # 优化：检查目录是否存在
+          # 修复：检查目录是否存在
           if not os.path.exists(SITES_DIR):
               print(f"Error: {SITES_DIR} not found", file=sys.stderr)
               sys.exit(1)
@@ -73,7 +74,7 @@ jobs:
               if not fname.endswith(".json"):
                   continue
               try:
-                  # 优化：指定 UTF-8 编码，避免解析乱码
+                  # 修复：指定 UTF-8 编码，避免解析乱码
                   with open(os.path.join(SITES_DIR, fname), encoding='utf-8') as f:
                       data = json.load(f)
               except Exception as e:
@@ -107,7 +108,7 @@ jobs:
                   if len(parts) >= 2:
                       tracker_suffixes.add(".".join(parts[-2:]))
 
-          # 优化：验证解析结果，避免空文件
+          # 修复：验证解析结果，避免空文件
           if len(site_domains) == 0:
               print("Error: No valid PT domains found", file=sys.stderr)
               sys.exit(1)
@@ -142,7 +143,7 @@ jobs:
           if [[ "${{ inputs.force_build }}" == "true" ]]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           else
-            # 优化：双重检查（diff + 文件非空）
+            # 修复：双重检查（diff + 文件非空）
             if git diff --cached --quiet; then
               echo "changed=false" >> $GITHUB_OUTPUT
             else
@@ -153,7 +154,7 @@ jobs:
       - name: Download mihomo
         if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit != 'true'
         run: |
-          # 优化：多源下载 + 可执行性验证，避免单源失效
+          # 修复：多源下载 + 可执行性验证，避免单源失效
           MI_HOMO_URLS=(
             "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz"
             "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64.gz"
@@ -165,7 +166,7 @@ jobs:
               ./mihomo -v >/dev/null 2>&1 && exit 0
             fi
           done
-          echo "Mihomo download failed (all sources)"
+          echo "Error: Mihomo download failed (all sources)"
           exit 1
 
       - name: Generate MRS
@@ -173,7 +174,7 @@ jobs:
         run: |
           chmod +x mihomo
 
-          # 优化：随机端口，避免端口占用冲突
+          # 修复：随机端口，避免端口占用冲突
           HTTP_PORT=$((18080 + RANDOM % 100))
           API_PORT=$((19090 + RANDOM % 100))
 
@@ -182,9 +183,9 @@ jobs:
           HTTP_PID=$!
           sleep 3  # 延长等待，确保服务启动
 
-          # 验证 HTTP 服务是否可用
+          # 修复：验证 HTTP 服务是否可用
           curl -s "http://127.0.0.1:$HTTP_PORT/pt-direct.txt" >/dev/null 2>&1 || {
-            echo "HTTP server failed to start"
+            echo "Error: HTTP server failed to start"
             kill $HTTP_PID 2>/dev/null || true
             exit 1
           }
@@ -192,7 +193,7 @@ jobs:
           # 生成配置文件（替换固定端口为随机端口）
           cat > /tmp/convert.yaml << EOF2
           mode: rule
-          log-level: error  # 优化：输出错误日志，便于调试
+          log-level: error  # 修复：输出错误日志，便于调试
           external-controller: 127.0.0.1:$API_PORT
           proxies:
             - {name: DUMMY, type: direct}
@@ -226,7 +227,7 @@ jobs:
           ./mihomo -d . -f /tmp/convert.yaml > mihomo.log 2>&1 &
           MI_HOMO_PID=$!
 
-          # 优化：更可靠的等待逻辑（最多 60 秒）
+          # 修复：更可靠的等待逻辑（最多 60 秒）
           MAX_WAIT=60
           WAIT_COUNT=0
           while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
@@ -239,7 +240,7 @@ jobs:
 
           # 检查是否生成成功
           if ! ls gen-rules/*.mrs 2>/dev/null; then
-            echo "MRS generation timeout/failed, logs:"
+            echo "Error: MRS generation timeout/failed, logs:"
             cat mihomo.log  # 输出日志便于调试
             kill $MI_HOMO_PID 2>/dev/null || true
             kill $HTTP_PID 2>/dev/null || true
@@ -252,7 +253,7 @@ jobs:
 
           # 复制 MRS 文件
           cp gen-rules/*.mrs ./ 2>/dev/null || true
-          ls -la *.mrs 2>/dev/null || echo "No MRS files generated"
+          ls -la *.mrs 2>/dev/null || echo "Warning: No MRS files generated"
 
       - name: Commit & Push
         if: steps.diff.outputs.changed == 'true'
@@ -260,25 +261,25 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 优化：拉取最新代码，避免推送冲突
+          # 修复：拉取最新代码，避免推送冲突
           git pull --rebase origin main || git pull --rebase origin master
 
-          # 优化：仅添加存在的文件，避免空文件提交
+          # 修复：仅添加存在的文件，避免空文件提交
           git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt 2>/dev/null
           ls *.mrs 2>/dev/null && git add *.mrs 2>/dev/null
 
-          # 优化：检查是否有内容需要提交
+          # 修复：检查是否有内容需要提交
           if git diff --cached --quiet; then
-            echo "No changes to commit"
+            echo "Info: No changes to commit"
             exit 0
           fi
 
-          # 优化：推送重试，避免网络波动失败
+          # 修复：推送重试，避免网络波动失败
           for i in {1..3}; do
             git commit -m "auto: update PT rules $(date +%Y-%m-%d_%H:%M:%S)" && git push && exit 0
             sleep 2
           done
-          echo "Push failed after 3 attempts"
+          echo "Error: Push failed after 3 attempts"
           exit 1
 
       # 新增：强制清理进程，避免资源泄漏
