@@ -28,25 +28,141 @@ jobs:
           key: mihomo-v1.19.1
 
       - name: Fetch & Parse PT Sites
+        id: parse
         run: |
           # 下载 pre-dessert-sites
-          curl -sL "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip
-          unzip -q sites.zip -d sites
+          echo "::group::Downloading pre-dessert-sites"
+          curl -sL --retry 3 --retry-delay 5 \
+            "https://github.com/mantou568/pre-dessert-sites/archive/main.zip" -o sites.zip
+          unzip -qo sites.zip -d sites
+          echo "::endgroup::"
 
           python3 << 'PYEOF'
-          import os, json
+          import os, json, re
           from urllib.parse import urlparse
+          from collections import defaultdict
 
           SITES_DIR = "sites/pre-dessert-sites-main/site_config/sites"
           COMMONS_DIR = "sites/pre-dessert-sites-main/site_config/commons"
 
           # 排除的非PT域名
-          EXCLUDE = {"t.me", "bilibili.download"}
+          EXCLUDE_DOMAINS = {"t.me", "bilibili.download", "github.com"}
 
-          site_domains = set()
-          tracker_suffixes = set()
+          # 已知的多段国家级后缀 (TLD+2)
+          # .edu.cn, .ac.cn, .com.cn, .net.cn, .org.cn, .gov.cn, .co.uk, .co.jp, .co.kr, .com.au, .net.au, .org.au, .co.in, .ac.uk, .or.jp
+          MULTI_PART_TLDS = {
+              "edu.cn", "ac.cn", "com.cn", "net.cn", "org.cn", "gov.cn",
+              "co.uk", "ac.uk", "org.uk", "me.uk", "gov.uk",
+              "co.jp", "ne.jp", "or.jp", "ac.jp", "ad.jp",
+              "co.kr", "ne.kr", "or.kr", "re.kr", "ac.kr",
+              "com.au", "net.au", "org.au", "edu.au", "gov.au",
+              "co.in", "net.in", "org.in", "ac.in", "edu.in",
+              "co.nz", "net.nz", "org.nz",
+              "co.za", "net.za", "org.za",
+              "com.br", "net.br", "org.br",
+              "com.tr", "net.tr", "org.tr", "edu.tr",
+              "co.il", "org.il", "net.il",
+              "co.th", "net.th", "or.th",
+              "co.id", "net.id", "or.id",
+              "com.mx", "net.mx", "org.mx",
+              "co.hu", "net.hu",
+              "co.at", "or.at",
+              "co.za", "org.za",
+          }
 
-          # 遍历所有站点 JSON
+          def get_registrable_domain(host):
+              """获取可注册域名（处理多段 TLD）
+              hudbt.hust.edu.cn -> hust.edu.cn
+              www.example.com -> example.com
+              sub.example.co.uk -> example.co.uk
+              """
+              parts = host.split(".")
+              if len(parts) < 2:
+                  return host
+
+              # 检查是否是多段 TLD
+              if len(parts) >= 3:
+                  tld2 = ".".join(parts[-2:])
+                  if tld2 in MULTI_PART_TLDS:
+                      if len(parts) >= 3:
+                          return ".".join(parts[-3:])
+                  # www 处理
+                  if parts[0] == "www":
+                      remaining = parts[1:]
+                      if len(remaining) >= 3:
+                          tld2_check = ".".join(remaining[-2:])
+                          if tld2_check in MULTI_PART_TLDS:
+                              return ".".join(remaining[-3:])
+                      return ".".join(remaining[-2:]) if len(remaining) >= 2 else remaining[0]
+
+              # 普通 TLD+1
+              if parts[0] == "www" and len(parts) >= 3:
+                  return ".".join(parts[-2:])
+              return ".".join(parts[-2:])
+
+          def get_tracker_domain(host):
+              """为站点生成对应的 tracker 域名
+              例: m-team.cc -> tracker.m-team.cc
+                  hudbt.hust.edu.cn -> tracker.hudbt.hust.edu.cn
+              """
+              # 去掉 www
+              if host.startswith("www."):
+                  host = host[4:]
+              return f"tracker.{host}"
+
+          def extract_hosts(data):
+              """从站点配置 JSON 中提取所有相关域名"""
+              hosts = []
+
+              # 直接 domain 字段
+              if data.get("domain"):
+                  hosts.append(data["domain"])
+              if data.get("domain_url"):
+                  hosts.append(data["domain_url"])
+
+              # additional_domain
+              for d in data.get("additional_domain", []):
+                  if d:
+                      hosts.append(d)
+
+              # API 地址
+              if data.get("api"):
+                  hosts.append(data["api"])
+              if data.get("api_url"):
+                  hosts.append(data["api_url"])
+
+              # site 条目（某些配置在 site 数组中）
+              for site in data.get("site", []):
+                  if isinstance(site, dict):
+                      if site.get("domain"):
+                          hosts.append(site["domain"])
+                      if site.get("url"):
+                          hosts.append(site["url"])
+
+              return hosts
+
+          def parse_host(url_str):
+              """从 URL 或域名字符串中解析出 hostname"""
+              url_str = url_str.strip()
+              if not url_str:
+                  return None
+              # 纯域名（无协议）加上 https://
+              if "://" not in url_str:
+                  url_str = "https://" + url_str
+              try:
+                  parsed = urlparse(url_str)
+                  host = parsed.hostname
+                  if host and not re.match(r'^\d+\.\d+\.\d+\.\d+$', host):  # 排除 IP
+                      return host.lower()
+              except Exception:
+                  pass
+              return None
+
+          # ===== 主逻辑 =====
+          site_domains = set()          # 站点主域名
+          all_tracker_hosts = set()     # 精确的 tracker 域名
+          errors = []
+
           for fname in sorted(os.listdir(SITES_DIR)):
               if not fname.endswith(".json"):
                   continue
@@ -54,57 +170,50 @@ jobs:
                   with open(os.path.join(SITES_DIR, fname)) as f:
                       data = json.load(f)
               except Exception as e:
-                  print(f"Error parsing {fname}: {e}")
+                  errors.append(f"Parse error {fname}: {e}")
                   continue
 
-              urls = []
-              if data.get("domain"):
-                  urls.append(data["domain"])
-              urls.extend(data.get("additional_domain", []))
-              if data.get("api"):
-                  urls.append(data["api"])
-
-              for url in urls:
-                  if not url:
+              raw_hosts = extract_hosts(data)
+              for raw in raw_hosts:
+                  host = parse_host(raw)
+                  if not host or host in EXCLUDE_DOMAINS:
                       continue
-                  parsed = urlparse(url if "://" in url else "https://" + url)
-                  host = parsed.hostname
-                  if not host or host in EXCLUDE:
-                      continue
+                  site_domains.add(host)
 
-                  parts = host.split(".")
-                  # www.xxx.com → xxx.com
-                  if parts[0] == "www" and len(parts) >= 3:
-                      root = ".".join(parts[1:])
-                      site_domains.add(root)
-                  else:
-                      site_domains.add(host)
+                  # 生成精确的 tracker 域名（不过度通配）
+                  all_tracker_hosts.add(get_tracker_domain(host))
 
-                  # 收集 TLD+1 后缀，避免重复生成 tracker
-                  if len(parts) >= 2:
-                      tracker_suffixes.add(".".join(parts[-2:]))
-
-          # 生成 tracker 域名
-          tracker_keywords = sorted(f"tracker.{s}" for s in tracker_suffixes)
           site_domains = sorted(site_domains)
+          all_tracker_hosts = sorted(all_tracker_hosts)
 
-          print(f"Sites: {len(site_domains)}, Tracker suffixes: {len(tracker_suffixes)}")
+          print(f"✅ Sites: {len(site_domains)}, Tracker hosts: {len(all_tracker_hosts)}")
+          if errors:
+              print(f"⚠️  Errors: {len(errors)}")
+              for e in errors[:10]:
+                  print(f"   {e}")
 
-          # 写 pt-direct.txt
+          # ===== 写文件 =====
+
+          # pt-direct.txt — 站点域名直连
           with open("pt-direct.txt", "w") as f:
               for d in site_domains:
                   f.write(f"+.{d}\n")
 
-          # 写 pt-tracker-direct.txt
+          # pt-tracker-direct.txt — 精确 tracker 域名直连
           with open("pt-tracker-direct.txt", "w") as f:
-              for d in tracker_keywords:
+              for d in all_tracker_hosts:
                   f.write(f"+.{d}\n")
               f.write("tracker\n")  # DOMAIN-KEYWORD 兜底
 
-          # 写 pt-tracker-fakeip.txt
+          # pt-tracker-fakeip.txt — 精确 tracker 域名 fakeip
           with open("pt-tracker-fakeip.txt", "w") as f:
-              for d in tracker_keywords:
+              for d in all_tracker_hosts:
                   f.write(f"+.{d}\n")
+
+          # 输出统计供后续 step 使用
+          with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+              f.write(f"site_count={len(site_domains)}\n")
+              f.write(f"tracker_count={len(all_tracker_hosts)}\n")
 
           PYEOF
 
@@ -112,31 +221,85 @@ jobs:
         id: diff
         run: |
           git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt
+
           if [[ "${{ inputs.force_build }}" == "true" ]]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           else
             git diff --cached --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
+          # 生成变更摘要
+          echo "### PT Rules Update Summary" > /tmp/summary.md
+          echo "- Sites: ${{ steps.parse.outputs.site_count }}" >> /tmp/summary.md
+          echo "- Trackers: ${{ steps.parse.outputs.tracker_count }}" >> /tmp/summary.md
+          echo "" >> /tmp/summary.md
+          echo "```diff" >> /tmp/summary.md
+          git diff --cached --stat >> /tmp/summary.md 2>/dev/null || echo "(no diff)" >> /tmp/summary.md
+          echo "```" >> /tmp/summary.md
+          cat /tmp/summary.md >> $GITHUB_STEP_SUMMARY
+
       - name: Download mihomo
         id: download_mihomo
         if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit != 'true'
-        continue-on-error: true  # 下载失败不终止流程
+        continue-on-error: true
         run: |
-          # 检测下载是否成功
-          if ! curl -sL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz" | gunzip > mihomo; then
+          download_with_retry() {
+            local url="$1"
+            local output="$2"
+            local max_retries=3
+            local attempt=0
+
+            while [ $attempt -lt $max_retries ]; do
+              attempt=$((attempt + 1))
+              echo "Download attempt $attempt/$max_retries..."
+
+              if curl -sL --connect-timeout 15 --max-time 120 \
+                   --retry 2 --retry-delay 5 \
+                   "$url" -o "${output}.tmp"; then
+                if [ -s "${output}.tmp" ]; then
+                  mv "${output}.tmp" "$output"
+                  return 0
+                fi
+              fi
+
+              rm -f "${output}.tmp"
+              [ $attempt -lt $max_retries ] && sleep $((attempt * 5))
+            done
+            return 1
+          }
+
+          # 尝试多个下载源
+          MIRRORS=(
+            "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-go122.gz"
+            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.1/mihomo-linux-amd64-go122.gz"
+          )
+
+          success=false
+          for url in "${MIRRORS[@]}"; do
+            echo "Trying: $url"
+            if download_with_retry "$url" "mihomo.gz"; then
+              if gunzip -f mihomo.gz && [ -s mihomo ]; then
+                chmod +x mihomo
+                echo "✅ Downloaded mihomo from: $url"
+                echo "mihomo_download_success=true" >> $GITHUB_OUTPUT
+                success=true
+                break
+              fi
+            fi
+          done
+
+          if [ "$success" != "true" ]; then
             echo "mihomo_download_success=false" >> $GITHUB_OUTPUT
-            echo "::error::mihomo 内核下载失败"
+            echo "::error::All mihomo download attempts failed"
             exit 1
           fi
-          chmod +x mihomo
-          echo "mihomo_download_success=true" >> $GITHUB_OUTPUT
 
       - name: Mark mihomo cache success
         id: cache_success
         if: steps.diff.outputs.changed == 'true' && steps.cache-mihomo.outputs.cache-hit == 'true'
         run: |
           echo "mihomo_download_success=true" >> $GITHUB_OUTPUT
+          echo "✅ Using cached mihomo"
 
       - name: Notify mihomo download failure
         if: steps.download_mihomo.outputs.mihomo_download_success == 'false'
@@ -153,6 +316,8 @@ jobs:
           python3 -m http.server 18080 --bind 127.0.0.1 &
           HTTP_PID=$!
           sleep 2
+
+          mkdir -p gen-rules
 
           cat > /tmp/convert.yaml << 'EOF2'
           mode: rule
@@ -187,28 +352,42 @@ jobs:
           EOF2
 
           ./mihomo -d . -f /tmp/convert.yaml &
+          MIHOMO_PID=$!
 
           # 等待 MRS 文件生成，最多 30 秒
-          timeout 30 bash -c 'until ls gen-rules/*.mrs 2>/dev/null; do sleep 1; done' || {
-            echo "MRS generation timeout"
-            kill $(pgrep mihomo) 2>/dev/null || true
-            kill $HTTP_PID 2>/dev/null || true
-            exit 1
+          timeout 30 bash -c '
+            while true; do
+              count=$(ls gen-rules/*.mrs 2>/dev/null | wc -l)
+              if [ "$count" -ge 3 ]; then
+                echo "✅ All MRS files generated ($count)"
+                exit 0
+              fi
+              sleep 1
+            done
+          ' || {
+            echo "::warning::MRS generation timeout"
+            ls -la gen-rules/ 2>/dev/null
           }
 
-          kill $(pgrep mihomo) 2>/dev/null || true
+          kill $MIHOMO_PID 2>/dev/null || true
           kill $HTTP_PID 2>/dev/null || true
+          sleep 1
 
           cp gen-rules/*.mrs ./ 2>/dev/null || true
-          ls -la *.mrs 2>/dev/null || echo "MRS generation skipped"
+          ls -la *.mrs 2>/dev/null || echo "::warning::No MRS files generated"
 
       - name: Commit & Push
         if: steps.diff.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
-          # 仅添加存在的文件，避免 MRS 未生成时报错
-          git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt 2>/dev/null
-          ls *.mrs 2>/dev/null && git add *.mrs 2>/dev/null
-          git commit -m "auto: update PT rules $(date +%Y-%m-%d)"
+
+          git add pt-direct.txt pt-tracker-direct.txt pt-tracker-fakeip.txt
+          ls *.mrs >/dev/null 2>&1 && git add *.mrs
+
+          sites="${{ steps.parse.outputs.site_count }}"
+          trackers="${{ steps.parse.outputs.tracker_count }}"
+          git commit -m "auto: update PT rules $(date +%Y-%m-%d)
+
+          sites: ${sites}, trackers: ${trackers}"
           git push
