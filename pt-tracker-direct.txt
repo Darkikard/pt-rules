@@ -8,7 +8,6 @@
 +.tracker.anime-no-index.com
 +.tracker.api.fsm.name
 +.tracker.api.m-team.cc
-+.tracker.api.nullbr.eu.org
 +.tracker.audiences.me
 +.tracker.azusa.wiki
 +.tracker.beitai.pt
@@ -49,7 +48,6 @@
 +.tracker.gemini-tracker.org
 +.tracker.generation-free.org
 +.tracker.greatposterwall.com
-+.tracker.gyg.si
 +.tracker.haidan.video
 +.tracker.happyfappy.org
 +.tracker.hawke.uno
@@ -108,7 +106,6 @@
 +.tracker.nex.jivon.de
 +.tracker.nicept.net
 +.tracker.njtupt.top
-+.tracker.nullbr.eu.org
 +.tracker.okpt.net
 +.tracker.oldtoons.world
 +.tracker.open.cd
@@ -172,7 +169,7 @@
 +.tracker.reelflix.cc
 +.tracker.rocket-hd.cc
 +.tracker.rotorrent.info
-+.tracker.rousi.zip
++.tracker.rousi.pro
 +.tracker.sanpro.pw
 +.tracker.sbpt.link
 +.tracker.sewerpt.com

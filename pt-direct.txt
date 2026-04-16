@@ -6,7 +6,6 @@
 +.anime-no-index.com
 +.api.fsm.name
 +.api.m-team.cc
-+.api.nullbr.eu.org
 +.audiences.me
 +.azusa.wiki
 +.bitporn.eu
@@ -87,7 +86,6 @@
 +.new.qingwa.pro
 +.nex.jivon.de
 +.njtupt.top
-+.nullbr.eu.org
 +.oldtoons.world
 +.our.kelu.one
 +.ourbits.club
@@ -143,7 +141,7 @@
 +.reelflix.cc
 +.rocket-hd.cc
 +.rotorrent.info
-+.rousi.zip
++.rousi.pro
 +.sanpro.pw
 +.sbpt.link
 +.sewerpt.com
@@ -179,7 +177,6 @@
 +.www.dragonhd.xyz
 +.www.empornium.sx
 +.www.gamegamept.com
-+.www.gyg.si
 +.www.haidan.video
 +.www.hddolby.com
 +.www.hdkyl.in
