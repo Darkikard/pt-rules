@@ -205,8 +205,10 @@ jobs:
                   f.write(f"+.{d}\n")
               f.write("tracker\n")  # DOMAIN-KEYWORD 兜底
 
-          # pt-tracker-fakeip.txt — 精确 tracker 域名 fakeip
+          # pt-tracker-fakeip.txt — 站点 + tracker 域名 fakeip（双合一）
           with open("pt-tracker-fakeip.txt", "w") as f:
+              for d in site_domains:
+                  f.write(f"+.{d}\n")
               for d in all_tracker_hosts:
                   f.write(f"+.{d}\n")
 
