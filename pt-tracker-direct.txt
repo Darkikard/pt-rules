@@ -48,7 +48,7 @@
 +.tracker.gemini-tracker.org
 +.tracker.generation-free.org
 +.tracker.greatposterwall.com
-+.tracker.haidan.video
++.tracker.haidan.cc
 +.tracker.happyfappy.org
 +.tracker.hawke.uno
 +.tracker.hd-united.vn
@@ -115,6 +115,7 @@
 +.tracker.p.t-baozi.cc
 +.tracker.pandapt.net
 +.tracker.piggo.me
++.tracker.playlet.cc
 +.tracker.playletpt.xyz
 +.tracker.polishtorrent.top
 +.tracker.portugas.org

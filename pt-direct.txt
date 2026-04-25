@@ -92,6 +92,7 @@
 +.p.t-baozi.cc
 +.pandapt.net
 +.piggo.me
++.playlet.cc
 +.playletpt.xyz
 +.polishtorrent.top
 +.portugas.org
@@ -177,7 +178,7 @@
 +.www.dragonhd.xyz
 +.www.empornium.sx
 +.www.gamegamept.com
-+.www.haidan.video
++.www.haidan.cc
 +.www.hddolby.com
 +.www.hdkyl.in
 +.www.hitpt.com
